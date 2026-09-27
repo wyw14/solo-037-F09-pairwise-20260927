@@ -2,8 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/wyw14/solo-037/internal/model"
@@ -16,6 +20,8 @@ type MeasurementService interface {
 	MeasuredRuns() []service.MeasuredRun
 	MeasuredRun(model.RunID) (service.MeasuredRun, bool)
 	AnalyzeMeasuredRun(model.RunID) (service.MeasurementAnalysis, error)
+	SearchMeasuredRuns(service.MeasurementFilter, int) (service.MeasurementSearchPage, error)
+	SearchMeasuredRunsNext(string) (service.MeasurementSearchPage, error)
 }
 
 type createMeasuredRunRequest struct {
@@ -89,4 +95,85 @@ func (r *Router) measurementAnalysis(w http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeJSON(w, value)
+}
+
+// searchQueryParams are the first-page parameters that pin a snapshot. None of
+// them may accompany a cursor: continuation reuses the pinned conditions so a
+// paged scan can never silently change filters between pages.
+var searchQueryParams = map[string]bool{
+	"model_name": true,
+	"section":    true,
+	"source_id":  true,
+	"start":      true,
+	"end":        true,
+	"limit":      true,
+}
+
+func (r *Router) searchMeasurements(w http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	for name := range query {
+		if name != "cursor" && !searchQueryParams[name] {
+			http.Error(w, "unknown search parameter: "+name, http.StatusBadRequest)
+			return
+		}
+	}
+	cursor := strings.TrimSpace(query.Get("cursor"))
+	if cursor != "" {
+		for name, values := range query {
+			if name == "cursor" {
+				continue
+			}
+			if searchQueryParams[name] && len(values) > 0 && strings.TrimSpace(values[0]) != "" {
+				http.Error(w, "search conditions cannot change while paging; resend only cursor or start a new search", http.StatusBadRequest)
+				return
+			}
+		}
+		page, err := r.dependencies.SearchMeasuredRunsNext(cursor)
+		if errors.Is(err, service.ErrSearchCursorInvalid) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if errors.Is(err, service.ErrSearchCursorExpired) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, page)
+		return
+	}
+
+	filter := service.MeasurementFilter{
+		ModelName: strings.TrimSpace(query.Get("model_name")),
+		Section:   strings.TrimSpace(query.Get("section")),
+		SourceID:  strings.TrimSpace(query.Get("source_id")),
+	}
+	var err error
+	if raw := strings.TrimSpace(query.Get("start")); raw != "" {
+		if filter.Start, err = time.Parse(time.RFC3339, raw); err != nil {
+			http.Error(w, "start must be an RFC3339 timestamp", http.StatusBadRequest)
+			return
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("end")); raw != "" {
+		if filter.End, err = time.Parse(time.RFC3339, raw); err != nil {
+			http.Error(w, "end must be an RFC3339 timestamp", http.StatusBadRequest)
+			return
+		}
+	}
+	limit := 0
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		if limit, err = strconv.Atoi(raw); err != nil || limit <= 0 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+	}
+	page, err := r.dependencies.SearchMeasuredRuns(filter, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, page)
 }
