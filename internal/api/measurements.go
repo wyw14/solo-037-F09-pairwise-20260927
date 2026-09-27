@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/wyw14/solo-037/internal/model"
@@ -16,6 +18,7 @@ type MeasurementService interface {
 	MeasuredRuns() []service.MeasuredRun
 	MeasuredRun(model.RunID) (service.MeasuredRun, bool)
 	AnalyzeMeasuredRun(model.RunID) (service.MeasurementAnalysis, error)
+	QueryMeasurements(service.MeasurementFilter, int, string) (service.MeasurementPage, error)
 }
 
 type createMeasuredRunRequest struct {
@@ -43,6 +46,48 @@ func decodeMeasurementBody(request *http.Request, value any) error {
 
 func (r *Router) measuredRuns(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, r.dependencies.MeasuredRuns())
+}
+
+func parseMeasurementWindow(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339, raw)
+}
+
+func (r *Router) searchMeasurements(w http.ResponseWriter, request *http.Request) {
+	params := request.URL.Query()
+	since, err := parseMeasurementWindow(params.Get("since"))
+	if err != nil {
+		http.Error(w, "invalid since: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	until, err := parseMeasurementWindow(params.Get("until"))
+	if err != nil {
+		http.Error(w, "invalid until: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	limit := 0
+	if raw := params.Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+	}
+	filter := service.MeasurementFilter{
+		ModelName: params.Get("model"),
+		Section:   params.Get("section"),
+		SourceID:  params.Get("probe"),
+		Since:     since,
+		Until:     until,
+	}
+	page, err := r.dependencies.QueryMeasurements(filter, limit, params.Get("cursor"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, page)
 }
 
 func (r *Router) createMeasuredRun(w http.ResponseWriter, request *http.Request) {

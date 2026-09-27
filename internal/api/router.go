@@ -30,6 +30,7 @@ func (r *Router) Handler() http.Handler {
 	router.Get("/api/incidents", r.incidents)
 	router.Get("/api/measured-runs", r.measuredRuns)
 	router.Post("/api/measured-runs", r.createMeasuredRun)
+	router.Get("/api/measured-runs/search", r.searchMeasurements)
 	router.Get("/api/measured-runs/{id}", r.measuredRun)
 	router.Post("/api/measured-runs/{id}/evidence", r.recordMeasurement)
 	router.Get("/api/measured-runs/{id}/analysis", r.measurementAnalysis)
